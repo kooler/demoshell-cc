@@ -1,0 +1,7 @@
+{
+  "name": "demoshell",
+  "description": "Write a Demoshell VM JSON file for a terminal app, ready to import and build as a live browser demo.",
+  "author": { "name": "Demoshell", "url": "https://demoshell.com" },
+  "homepage": "https://demoshell.com/docs/claude-code",
+  "repository": "https://github.com/kooler/demoshell-cc"
+}

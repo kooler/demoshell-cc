@@ -1,0 +1,12 @@
+{
+  "name": "demoshell",
+  "description": "Claude Code plugins for Demoshell, live demos of terminal apps in the browser.",
+  "owner": { "name": "Demoshell", "url": "https://demoshell.com" },
+  "plugins": [
+    {
+      "name": "demoshell",
+      "source": "./",
+      "description": "Write a Demoshell VM JSON file for a terminal app, ready to import and build as a live browser demo."
+    }
+  ]
+}
