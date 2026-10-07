@@ -133,6 +133,114 @@ function validateWebUrl(input) {
   if ([...normalized].length > MAX_WEB_URL_CHARS) return fail2("too_long");
   return { ok: true, normalized, port, path: path2 };
 }
+var MAX_RECIPE_FILES = 64;
+var MAX_RECIPE_FILES_TOTAL_BYTES = 256 * 1024;
+var MAX_RECIPE_FILE_PATH_BYTES = 255;
+var RECIPE_PATH_CONTROL = /[\u0000-\u001f\u007f-\u009f]/;
+function refusedPlace(path2) {
+  if (path2 === "/tmp/build.sh") {
+    return "This is where the build script itself is written, so a file cannot go here";
+  }
+  if (path2 === "/.demoshell-files" || path2.startsWith("/.demoshell-files/")) {
+    return "This folder holds the files on their way into the VM and is removed afterwards";
+  }
+  if (path2 === "/root/.arm64js-after-load") {
+    return "The after-load script replaces this file later in the build, so it would be gone from the VM";
+  }
+  if (path2.includes("ARM64JS_BUILD_")) return "ARM64JS_BUILD_ is reserved by the build runner and cannot be in a path";
+  for (const root of ["/proc", "/sys", "/dev"]) {
+    if (path2 === root || path2.startsWith(`${root}/`)) return "Files cannot be written under /proc, /sys or /dev";
+  }
+  return null;
+}
+function recipeFilePathError(path2) {
+  if (!path2.startsWith("/")) {
+    return { rule: "relative", message: path2 ? "The path must start with /" : "Enter the file's path" };
+  }
+  if (byteLen(path2) > MAX_RECIPE_FILE_PATH_BYTES) {
+    return { rule: "path_too_long", message: `The path is longer than ${MAX_RECIPE_FILE_PATH_BYTES} bytes` };
+  }
+  if (RECIPE_PATH_CONTROL.test(path2)) return { rule: "control", message: "The path contains a control character" };
+  if (path2.includes("'")) return { rule: "quote", message: "The path must not contain ' (a single quote)" };
+  if (path2.endsWith("/"))
+    return { rule: "trailing_slash", message: "The path must name a file, so it cannot end with /" };
+  if (path2.slice(1).split("/").some((seg) => seg === "" || seg === "." || seg === "..")) {
+    return { rule: "segment", message: "The path must not contain . or .. or an empty part (//)" };
+  }
+  const why = refusedPlace(path2);
+  if (why) return { rule: "refused", message: why };
+  return null;
+}
+function recipeFileModeIsValid(mode) {
+  return /^0?[0-7]{3}$/.test(mode);
+}
+function recipeFilesTotalBytes(files) {
+  return files.reduce((n, f) => n + byteLen(f.content), 0);
+}
+function validateRecipeFiles(files) {
+  const out = [];
+  if (files.length > MAX_RECIPE_FILES) {
+    out.push({
+      index: null,
+      field: "files",
+      rule: "too_many",
+      message: `A recipe holds at most ${MAX_RECIPE_FILES} files (this one has ${files.length})`
+    });
+  }
+  const seen = /* @__PURE__ */ new Set();
+  files.forEach((f, index) => {
+    const pathError = recipeFilePathError(f.path);
+    if (pathError) out.push({ index, field: "path", ...pathError });
+    if (f.mode !== void 0 && !recipeFileModeIsValid(f.mode)) {
+      out.push({
+        index,
+        field: "mode",
+        rule: "mode",
+        message: "Mode must be three or four octal digits, such as 0644 or 0755 (no setuid, setgid or sticky bit)"
+      });
+    }
+    if (!pathError) {
+      if (seen.has(f.path)) {
+        out.push({ index, field: "path", rule: "duplicate", message: "Another file already uses this path" });
+      }
+      seen.add(f.path);
+    }
+  });
+  const valid = files.filter((f) => !recipeFilePathError(f.path)).map((f) => f.path);
+  const isValid = (f) => !recipeFilePathError(f.path);
+  files.forEach((f, index) => {
+    const inner = isValid(f) ? valid.find((p) => p.startsWith(`${f.path}/`)) : void 0;
+    if (inner) {
+      out.push({
+        index,
+        field: "path",
+        rule: "nested",
+        message: `${inner} would need this path to be a folder, but it is a file`
+      });
+    }
+  });
+  files.forEach((f, index) => {
+    const outer = isValid(f) ? valid.find((p) => f.path.startsWith(`${p}/`)) : void 0;
+    if (outer) {
+      out.push({
+        index,
+        field: "path",
+        rule: "nested",
+        message: `This puts the file inside ${outer}, but that is a file, not a folder`
+      });
+    }
+  });
+  const total = recipeFilesTotalBytes(files);
+  if (total > MAX_RECIPE_FILES_TOTAL_BYTES) {
+    out.push({
+      index: null,
+      field: "files",
+      rule: "too_large",
+      message: `The files add up to ${Math.ceil(total / 1024)} KiB; the limit is ${MAX_RECIPE_FILES_TOTAL_BYTES / 1024} KiB`
+    });
+  }
+  return out;
+}
 function validateRecipe(r, ctx = {}) {
   if (!ALLOWED_BASE_IMAGES.includes(r.base_image)) {
     return `Base image must be one of: ${ALLOWED_BASE_IMAGES.join(", ")}`;
@@ -341,6 +449,8 @@ function readRecipe(raw, watches2) {
     // plan — so an imported document cannot hand a free org guest internet.
     net_enabled: bool(r.net_enabled, '"recipe.net_enabled"', false)
   };
+  const files = readFiles(r.files);
+  if (files.length) recipe2.files = files;
   const error = validateRecipe(recipe2);
   if (error) fail(error);
   const defined = new Set(watches2.map((w) => w.name));
@@ -354,6 +464,25 @@ function readRecipe(raw, watches2) {
     fail(`The recipe uses {{versions.${unique[0]}}}, but no watch named "${unique[0]}" is in "watches".`);
   }
   return recipe2;
+}
+function readFiles(raw) {
+  if (raw === void 0 || raw === null) return [];
+  if (!Array.isArray(raw)) fail('"recipe.files" must be a list');
+  const files = raw.map((entry, i) => {
+    const f = obj(entry, `"recipe.files[${i}]"`);
+    const file = {
+      path: str(f.path, `"recipe.files[${i}].path"`),
+      content: str(f.content, `"recipe.files[${i}].content"`)
+    };
+    if (f.mode !== void 0 && f.mode !== null) file.mode = str(f.mode, `"recipe.files[${i}].mode"`);
+    return file;
+  });
+  const problem = validateRecipeFiles(files)[0];
+  if (problem) {
+    const where = problem.index === null ? '"recipe.files"' : `"recipe.files[${problem.index}].${problem.field}"`;
+    fail(`${where}: ${problem.message}`);
+  }
+  return files;
 }
 function readGuide(raw) {
   if (raw === void 0 || raw === null) return null;

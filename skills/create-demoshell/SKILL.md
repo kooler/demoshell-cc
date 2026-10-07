@@ -153,6 +153,7 @@ timestamps or build results: the file holds only what a person writes.
 | Field | Rule |
 |---|---|
 | `script` | At most 64 KB. Runs as root in one shell; a failing command fails the build. Must **exit**. |
+| `files` | Text files written before `script` runs: `[{ "path", "content", "mode" }]`. At most 64 files and 256 KB of content in total. `mode` is an octal string, default `"0644"`. |
 | `start_command` | One line, at most 512 characters. The full-screen app, left running. Never with `after_load`. |
 | `after_load` | At most 4 KB. Runs on every load, for every visitor. Only `cd` and a short message. Never with `start_command`. |
 | `start_wait_s` | `0`–`600`. For a full-screen app, `2`–`5`, so the saved screen (and its screenshot) is fully drawn. |
@@ -161,6 +162,14 @@ timestamps or build results: the file holds only what a person writes.
 
 Writing the script:
 
+- Every file the recipe creates goes in `files`, not in a heredoc or a `printf … >`
+  in the script: configs, sample data, wrapper scripts. `script` keeps the installs,
+  downloads and commands, and anything that needs a version. Use `"mode": "0755"`
+  for anything that is executed. Content is written exactly as given (end it with
+  `\n`), and `{{versions.…}}` is not replaced inside it.
+- Files are written **before** the script, so before any `apk add`. A file a package
+  installs at the same path is written from the script, after the install. Missing
+  folders are created.
 - Install with one of the routes above. Print the version after installing
   (`app --version`), so a broken install fails the build instead of the demo.
 - Pin a release binary's version in the URL. Put it in a variable at the top of the
@@ -178,12 +187,17 @@ Writing the script:
   you used to try out the guide's commands before handing the file over.
 
 **Go apps.** Go's garbage collector is expensive on the emulated CPU. Wrap the binary
-so the setting applies however it starts:
+so the setting applies however it starts. The script installs the real binary as
+`/usr/local/bin/app-real`, and the wrapper is a file:
 
-```sh
-mv /usr/local/bin/app /usr/local/bin/app-real
-printf '#!/bin/sh\nexport GOGC=off GOMEMLIMIT=400MiB\nexec /usr/local/bin/app-real "$@"\n' > /usr/local/bin/app
-chmod +x /usr/local/bin/app
+```json
+"files": [
+  {
+    "path": "/usr/local/bin/app",
+    "mode": "0755",
+    "content": "#!/bin/sh\nexport GOGC=off GOMEMLIMIT=400MiB\nexec /usr/local/bin/app-real \"$@\"\n"
+  }
+]
 ```
 
 Use `GOGC=off GOMEMLIMIT=400MiB` for a tool that runs and exits. For an app that
@@ -302,7 +316,11 @@ steps:
   },
   "recipe": {
     "base_image": "min",
-    "script": "apk add --no-cache lazygit git\nlazygit --version\ngit config --global user.email demo@example.com\ngit config --global user.name Demo\nmkdir -p /root/project && cd /root/project\ngit init -q\nprintf '# Project\\n\\nA small sample.\\n' > README.md\ngit add README.md && git commit -qm 'Add readme'\nprintf 'print(\"hello\")\\n' > main.py\ngit add main.py && git commit -qm 'Add main.py'\nprintf 'print(\"hello, world\")\\n' > main.py",
+    "script": "apk add --no-cache lazygit git\nlazygit --version\ngit config --global user.email demo@example.com\ngit config --global user.name Demo\ncd /root/project\ngit init -q\ngit add README.md && git commit -qm 'Add readme'\ngit add main.py && git commit -qm 'Add main.py'\nsed -i 's/hello/hello, world/' main.py",
+    "files": [
+      { "path": "/root/project/README.md", "content": "# Project\n\nA small sample.\n" },
+      { "path": "/root/project/main.py", "content": "print(\"hello\")\n" }
+    ],
     "start_command": "cd /root/project && lazygit",
     "start_wait_s": 3,
     "timeout_s": 600,
@@ -345,6 +363,7 @@ steps:
 }
 ```
 
-The script leaves a repository with history and one uncommitted edit, so every step
+The two files are written before the script, which commits them and then edits
+`main.py`. That leaves a repository with history and one uncommitted edit, so every step
 has something to act on the moment the visitor arrives. lazygit takes over the
 screen, so the steps are key presses and manual steps, never typed commands.
